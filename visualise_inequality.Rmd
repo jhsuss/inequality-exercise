@@ -1,0 +1,176 @@
+---
+title: "Visualising wealth inequality in the US"
+output:
+  html_document: default
+  word_document: default
+date: "2024-06-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = F, 
+  message = F
+  )
+```
+
+# Wealth inequality
+
+Our [recent paper](https://github.com/jhsuss/wealth-inequality/) provides the first estimates of wealth and wealth inequality in the US. We have made the data [publicly available](https://www.openicpsr.org/openicpsr/project/192306/version/V4/view) in the hope of spurring research on the causes and consequences of local wealth inequality. Let's examine some of this data (at the Commuting Zone level, for the years 1960-2022) here.
+
+## Get started 
+
+First load necessary libraries (or install if don't yet have) and the data.
+
+```{r, echo = F}
+#install.packages(c("tidyverse", "..."))
+library(tidyverse); theme_set(theme_minimal()) # set ggplot theme
+library(sf)
+library(cowplot)
+
+ineq <- read_csv("data/cz_wealth_inequality.csv")
+
+```
+
+Let's peruse the data. There are a lot of variables aside from the inequality estimates to explore!
+
+```{r}
+glimpse(ineq)
+```
+
+## Descriptives
+
+How does within-area wealth inequality in 1960 relate to wealth inequality in 2020. Let's look at a scatter plot of the top 1% share in both years.
+
+```{r}
+# reshape data and plot
+ggplot(ineq %>% 
+         filter(year %in% c(1960,2020)) %>% 
+         select(year, czone, wealth_top1) %>% 
+         pivot_wider(names_from = year, values_from = wealth_top1),
+       aes(x = `1960`, y = `2020`)
+       ) +
+  geom_point() 
+```
+
+
+
+
+## Maps
+
+Let's look at some maps now. First, we need to read in some shapefiles.
+
+```{r}
+# shapefiles can be conveniently downloaded using the ussf package, see how to install in github link
+#https://github.com/dcl-docs/ussf
+#remotes::install_github("dcl-docs/ussf")
+czs <- ussf::boundaries(geography = "cz") %>% 
+  rename(cz = cz_1990) %>% 
+  mutate(cz = as.numeric(cz)) %>% 
+  st_transform("EPSG:5070")
+
+# merge shapefiles
+ineq <- ineq %>% 
+  left_join(
+    czs,
+    by = c("czone" = "cz")
+  ) 
+
+```
+
+
+Now let's have a look at the spatial variation in inequality 
+
+```{r}
+ggplot(
+  data = ineq %>% 
+    filter(
+      year == 1980
+    )
+  ) +
+  geom_sf(
+    mapping = aes(
+      geometry = geometry,
+      fill = wealth_top1
+    )
+  ) + 
+  labs(
+    fill = "Top 1%\nwealth share",
+    title = "Commuting Zones, 1980"
+  ) +
+  scale_fill_viridis_c(option = "D") + 
+  theme_map(font_size = 20)
+
+```
+
+Let's look at a how average wealth has evolved over time.
+
+```{r}
+g <- purrr::map(ineq %>% filter(str_detect(year, "0$")) %>% .$year %>% unique,
+                function(x) {
+                  ggplot(
+                    data = ineq %>% 
+                      filter(
+                        year == x
+                      )
+                  ) +
+                    geom_sf(
+                      mapping = aes(
+                        geometry = geometry,
+                        fill = wealth_mean
+                      )
+                    ) + 
+                    labs(subtitle = x) +
+                    scale_fill_viridis_c(option = "D") + 
+                    theme_map(font_size = 8)
+                  
+  
+                })
+
+plot_grid(plotlist = g)
+
+```
+
+
+## Associations
+
+Let's look at how within-area wealth inequality is associated with key demographics, education and race. To do this, I'll look at a cross-section of the data, taking the year 2020.
+
+```{r}
+ggplot(
+  ineq %>% 
+    filter(year == 2020),
+  aes(x = 1-white, y = wealth_gini)
+  ) + 
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Non-white proportion", y = "Gini"
+  )
+
+```
+
+```{r}
+ggplot(
+  ineq %>% 
+    filter(year == 2020),
+  aes(x = 1-college, y = wealth_gini)
+  ) + 
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(
+    x = "Non-college proportion", y = "Gini"
+  )
+
+
+```
+
+## What other patterns can you find?
+
+Some questions: how has wealth inequality evolved over time within and between places? What explains the variation in wealth inequality over time and space? 
+
+Feel free to add in other data! For example, you can get social mobility data at the Commuting Zone level (from Raj Chetty et al using Facebook data): https://opportunityatlas.org/.
+
+```{r}
+# your code here
+```
