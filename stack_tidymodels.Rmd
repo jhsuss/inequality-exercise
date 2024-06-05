@@ -1,0 +1,229 @@
+---
+title: "Stacked Ensembles with Tidymodels"
+output:
+  html_document: default
+  word_document: default
+date: "2024-06-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = F, 
+  message = F
+  )
+```
+
+# Stacking
+
+Stacking is a very powerful approach to improving predictive performance. This notebook introduces the `stacks` package in the `tidymodels` for predicting household wealth. It borrows heavily from this resource: https://stacks.tidymodels.org/articles/basics.html  
+
+## Get started 
+
+First load necessary libraries (or install if don't yet have) and the data.
+
+```{r, echo = F}
+#install.packages(c("tidyverse", "..."))
+library(tidyverse)
+library(tidymodels)
+library(stacks)
+
+df <- read_csv("data/household_wealth.csv")
+
+```
+
+## Procedure set-up
+
+Now that we have our data, let's split into training and testing. The testing data (default 0.2) will be used only for evaluating performance of the stack ensemble once built.
+
+We will train the data using cross-validation (set at 5 folds). 
+
+```{r}
+set.seed(1) # for reproducibility
+df_split <- initial_split(df) # default is 75% training
+df_train <- training(df_split)
+df_test  <- testing(df_split)
+
+set.seed(1)
+folds <- rsample::vfold_cv(df_train, v = 5)
+
+```
+
+We then set the model formula (net wealth as a function of all variables) and performance metric (root mean squared error). We also set appropriate defaults settings for the stack (e.g. storing predictions from each fold) using `control_stack_*` functions.
+
+```{r}
+# define 'recipe'
+df_rec <- recipe(net_wealth ~ ., data = df_train)
+
+# extend the recipe
+df_rec <- df_rec %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>% # in case some variables have do not actually vary 
+  step_normalize(all_numeric_predictors()) 
+
+# you can do other pre-processing in the recipe here, for example: step_impute_mean(all_numeric_predictors()) 
+
+
+metric <- metric_set(rmse)
+
+ctrl_grid <- control_stack_grid()
+ctrl_res <- control_stack_resamples()
+
+```
+
+## Fitting level 1 (or candidate) models
+
+Now let's start training some modesls! There is a list of all models available for us in `tidymodels` here: https://www.tidymodels.org/find/parsnip/
+
+We'll start with some classics: linear regression, a random forest, and a simple neural network.
+
+```{r}
+# create a model definition
+lin_reg_spec <- linear_reg() %>%
+  set_engine("lm")
+
+# add both to a workflow
+lin_reg_wflow <- workflow() %>%
+  add_model(lin_reg_spec) %>%
+  add_recipe(df_rec)
+
+# fit to the 5-fold cv
+set.seed(2020)
+lin_reg_res <- fit_resamples(
+    lin_reg_wflow,
+    resamples = folds,
+    metrics = metric,
+    control = ctrl_res
+  )
+
+lin_reg_res
+
+
+```
+
+Now let's fit the random forest (which is itself an ensemble and will take a bit longer).
+
+```{r}
+# create a model definition
+rf_spec <- rand_forest(
+  mode = "regression"
+  ) %>%
+  set_engine("ranger")
+
+# add to workflow
+rf_wflow <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(df_rec)
+
+# fit to the 5-fold cv
+set.seed(2020)
+rf_res <- fit_resamples(
+    rf_wflow,
+    resamples = folds,
+    metrics = metric,
+    control = ctrl_res
+  )
+
+```
+
+And finally, the neural network
+
+```{r}
+# create a model definition
+nn_spec <- mlp(
+  mode = "regression"
+  ) %>%
+  set_engine("nnet")
+
+# add both to a workflow
+nn_wflow <- workflow() %>%
+  add_model(nn_spec) %>%
+  add_recipe(df_rec)
+
+# fit to the 5-fold cv
+set.seed(2020)
+nn_res <- fit_resamples(
+    nn_wflow,
+    resamples = folds,
+    metrics = metric,
+    control = ctrl_res
+  )
+
+
+```
+
+
+## Add you own
+
+Choose one or more models to add as candidates: https://www.tidymodels.org/find/parsnip/
+
+```{r}
+# your code here
+
+```
+
+
+## Stacking time!
+
+First, we add the 'candidates' (level 1 models) together. Include additional `add_candidates()` if you have fit more models above.
+
+```{r}
+df_data_st <- stacks() %>%
+  add_candidates(lin_reg_res) %>%
+  add_candidates(rf_res) %>%
+  add_candidates(nn_res)
+
+as_tibble(df_data_st)
+```
+
+Now we 'blend' the predictions (fit a second level model in other words). 
+
+The default in stacks is to use a LASSO model, which can reduce coefficients (or model weights) to 0. You can change this behaviour using the `penalty` or `mixture` arguments. Setting `penalty = 0` will implement a standard linear regression.   
+
+Check the documentation for `blend_predictions()`: https://stacks.tidymodels.org/reference/blend_predictions.html
+
+```{r}
+#' (LASSO second-level model)
+df_model_st <-
+  df_data_st %>%
+  blend_predictions(penalty = 0)
+
+# see weights
+autoplot(df_model_st, type = "weights")
+
+```
+
+
+Now we can fit the stack. We do this in the code chunk below and then also use our fitted stack to make predictions on the hold-out test set.
+
+```{r}
+# fit stack
+df_model_st <- df_model_st %>%
+  fit_members()
+
+# predict on test set
+df_test <- df_test %>%
+  bind_cols(predict(df_model_st, .))
+```
+
+
+## Evaluate stack performance 
+
+Now we are ready to examine how well our stack has done relative to the individual level one models.
+
+```{r}
+# examine performance
+df_test <- df_test %>%
+  bind_cols(predict(df_model_st, .))
+
+# compare stack w individual members
+member_preds <- df_test %>%
+  select(net_wealth) %>%
+  bind_cols(predict(df_model_st, df_test, members = TRUE))
+
+# check RMSE
+map(member_preds, rmse_vec, truth = member_preds$net_wealth) %>%
+  as_tibble()
+```
+
+
